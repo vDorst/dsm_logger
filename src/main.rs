@@ -1,12 +1,17 @@
+use chrono::{prelude::*, Local};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use rand::{self, thread_rng, Rng};
+use serial::{self, unix::TTYPort, SerialPort};
 use std::{
-    error::{Error},
-    io::{self, Write},
-    time::{Duration}
+    error::Error,
+    fs::{File, OpenOptions},
+    io::{self, BufWriter, Read, Write},
+    sync::mpsc::{channel, Receiver, Sender},
+    time::Duration,
 };
 use tui::{
     backend::{Backend, CrosstermBackend},
@@ -15,12 +20,6 @@ use tui::{
     widgets::{BarChart, Block, Borders},
     Frame, Terminal,
 };
-use rand::{self, Rng, thread_rng};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use chrono::{Local, prelude::*};
-use serial::{self, unix::TTYPort, SerialPort};
-use std::io::{BufWriter, Read};
-use std::fs::{File, OpenOptions};
 
 struct MeterData {
     time: DateTime<Local>,
@@ -39,22 +38,22 @@ fn demp_thread(tx: Sender<MeterData>) {
     let mut total: u64 = 0;
 
     loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let watt = rng.gen_range(0..2000);
-            total += watt;
-            
-            let data = MeterData {
-                time: Local::now(),
-                watt,
-                total: [total, 0],
-            };
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let watt = rng.gen_range(0..2000);
+        total += watt;
+
+        let data = MeterData {
+            time: Local::now(),
+            watt,
+            total: [total, 0],
+        };
 
         match tx.send(data) {
             Ok(_) => (),
             Err(e) => {
                 println!("Serial error {:?}", e);
-                break;            
-            },
+                break;
+            }
         }
     }
 }
@@ -65,25 +64,29 @@ fn serial_thread(port: TTYPort, tx: Sender<MeterData>) {
     for readout in reader {
         let telegram = readout.to_telegram().unwrap();
         let state = dsmr5::Result::<dsmr5::state::State>::from(&telegram).unwrap();
-    
+
         let mt = state.datetime.unwrap();
-    
-        let t = chrono::Local.ymd(2000 + mt.year as i32, mt.month as u32, mt.day as u32)
-                .and_hms(mt.hour as u32, mt.minute as u32, mt.second as u32);
+
+        let t = chrono::Local
+            .ymd(2000 + mt.year as i32, mt.month as u32, mt.day as u32)
+            .and_hms(mt.hour as u32, mt.minute as u32, mt.second as u32);
 
         let data = MeterData {
             time: t,
             watt: (state.power_delivered.unwrap() * 1000.0) as u64,
-            total: [ (state.meterreadings[0].to.unwrap()) as u64, (state.meterreadings[1].to.unwrap()) as u64],
-            //total: 0, 
+            total: [
+                (state.meterreadings[0].to.unwrap()) as u64,
+                (state.meterreadings[1].to.unwrap()) as u64,
+            ],
+            //total: 0,
         };
 
         match tx.send(data) {
             Ok(_) => (),
             Err(e) => {
                 println!("Serial error {:?}", e);
-                break;            
-            },
+                break;
+            }
         }
     }
 }
@@ -113,35 +116,44 @@ impl App {
             for (_s, data, _avg) in &self.data[0..avg_len] {
                 avg += data;
             }
-            avg / (avg_len + 1) as u64           
+            avg / (avg_len + 1) as u64
         };
 
         let mut logstr = String::with_capacity(255);
 
         logstr.push_str(data.time.format("%Y-%m-%d %H:%M:%S").to_string().as_str());
-        logstr.push_str(format!(";{};{};{};{};\n", data.total[0], data.total[1], data.watt, avg_xsec).as_str());
+        logstr.push_str(
+            format!(
+                ";{};{};{};{};\n",
+                data.total[0], data.total[1], data.watt, avg_xsec
+            )
+            .as_str(),
+        );
         self.log.write_all(logstr.as_bytes()).unwrap();
 
         let t = data.time.format("%H%M%S").to_string();
-        self.data.insert(0, (t, data.watt, avg_xsec))
+        self.data.insert(0, (t, data.watt, avg_xsec));
     }
 }
 
 const SETTINGS: serial::PortSettings = serial::PortSettings {
-    baud_rate:    serial::Baud115200,
-    char_size:    serial::Bits8,
-    parity:       serial::ParityNone,
-    stop_bits:    serial::Stop1,
+    baud_rate: serial::Baud115200,
+    char_size: serial::Bits8,
+    parity: serial::ParityNone,
+    stop_bits: serial::Stop1,
     flow_control: serial::FlowNone,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
-
     let mut args = std::env::args();
 
     let (tx, rx) = channel::<MeterData>();
 
-    let f = OpenOptions::new().write(true).create(true).append(true).open("log.csv")?;
+    let f = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(true)
+        .open("log.csv")?;
     let mut logfile = BufWriter::new(f);
 
     let header = "TIME;NORMAAL [kW];DAL [kW];POWER [W];AVG [W];\n";
@@ -156,9 +168,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         // }
         port.set_timeout(std::time::Duration::from_secs(3))?;
 
-        std::thread::spawn( || serial_thread(port, tx))
+        std::thread::spawn(|| serial_thread(port, tx))
     } else {
-        std::thread::spawn( || demp_thread(tx))
+        std::thread::spawn(|| demp_thread(tx))
     };
 
     // setup terminal
@@ -182,16 +194,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     terminal.show_cursor()?;
 
     if let Err(err) = res {
-        println!("{:?}", err)
+        println!("{:?}", err);
     }
 
     Ok(())
 }
 
-fn run_app<B: Backend>(
-    terminal: &mut Terminal<B>,
-    mut app: App,
-) -> io::Result<()> {
+fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui(f, &app))?;
 
@@ -205,8 +214,11 @@ fn run_app<B: Backend>(
         match app.meter_value.recv_timeout(Duration::from_millis(3000)) {
             Ok(data) => app.on_tick(data),
             Err(e) => {
-                return Err(io::Error::new(io::ErrorKind::Other, format!("RX channel: {:?}: Quit!", e)));
-            },
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("RX channel: {:?}: Quit!", e),
+                ));
+            }
         }
     }
 }
@@ -218,8 +230,12 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
         .split(f.size());
 
-    let data_cur = app.data.iter().map(|f| (f.0.as_str(), f.1)).collect::<Vec<(&str, u64)>>();   
-    
+    let data_cur = app
+        .data
+        .iter()
+        .map(|f| (f.0.as_str(), f.1))
+        .collect::<Vec<(&str, u64)>>();
+
     let barchart = BarChart::default()
         .block(Block::default().title("Current Watt").borders(Borders::ALL))
         .data(&data_cur)
@@ -228,10 +244,18 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
         .value_style(Style::default().fg(Color::Black).bg(Color::Yellow));
     f.render_widget(barchart, chunks[0]);
 
-    let data_cur = app.data.iter().map(|f| (f.0.as_str(), f.2)).collect::<Vec<(&str, u64)>>();   
+    let data_cur = app
+        .data
+        .iter()
+        .map(|f| (f.0.as_str(), f.2))
+        .collect::<Vec<(&str, u64)>>();
 
     let barchart = BarChart::default()
-        .block(Block::default().title("AVG x sampels").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("AVG x sampels")
+                .borders(Borders::ALL),
+        )
         .data(&data_cur)
         .bar_width(7)
         .bar_style(Style::default().fg(Color::Green))
