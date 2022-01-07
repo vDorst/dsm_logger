@@ -1,0 +1,15 @@
+[package]
+name = "dsm_logger"
+version = "0.1.0"
+authors = ["René van Dorst"]
+description = "dsmr5 logging program with bargraphs."
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+crossterm = "0.22"
+tui = { version = "0.16", default-features = false, features = ['crossterm'] }
+rand = "0.8"
+serial = "0.4"
+dsmr5 = "0.1.2"
+chrono = { version = "0.4", features = ["unstable-locales"] }
